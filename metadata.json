@@ -1,0 +1,7 @@
+{
+  "name": "Monetus",
+  "description": "Controle de finanças pessoais estilo planilha com orçamento e acompanhamento realizado.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
