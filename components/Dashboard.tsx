@@ -5,13 +5,14 @@ import EntriesTab from './tabs/EntriesTab';
 import RealizedTab from './tabs/RealizedTab';
 import HistoryTab from './tabs/HistoryTab';
 import ExpenseBudgetTab from './tabs/ExpenseBudgetTab';
+import SyncTab from './tabs/SyncTab';
 import { StorageService } from '../services/storage';
 
 interface Props {
   onLogout: () => void;
 }
 
-type TabType = 'entradas' | 'realizado' | 'meta_despesa' | 'historico';
+type TabType = 'entradas' | 'realizado' | 'meta_despesa' | 'historico' | 'sync';
 
 interface BudgetAlert {
     category: string;
@@ -28,6 +29,7 @@ const Dashboard: React.FC<Props> = ({ onLogout }) => {
     { id: 'realizado', label: 'Realizado Mês', shortLabel: 'Realizado' },
     { id: 'meta_despesa', label: 'Orçamento', shortLabel: 'Metas' },
     { id: 'historico', label: 'Histórico', shortLabel: 'Histórico' },
+    { id: 'sync', label: 'Sincronizar', shortLabel: 'Sync' },
   ];
 
   useEffect(() => {
@@ -167,7 +169,7 @@ const Dashboard: React.FC<Props> = ({ onLogout }) => {
         </div>
       )}
 
-      {/* Tabs Navigation - Styled like spreadsheet tabs with better touch targets for Android */}
+      {/* Tabs Navigation */}
       <div className="bg-emerald-700 px-1 pt-3 flex gap-1 overflow-x-auto shrink-0 no-scrollbar shadow-inner z-10">
         {tabs.map(tab => (
           <button
@@ -184,13 +186,14 @@ const Dashboard: React.FC<Props> = ({ onLogout }) => {
         ))}
       </div>
 
-      {/* Tab Content Area - Scrollable */}
+      {/* Tab Content Area */}
       <main className="flex-1 overflow-hidden relative bg-gray-50">
         <div className="absolute inset-0 overflow-auto">
             {activeTab === 'entradas' && <EntriesTab />}
             {activeTab === 'realizado' && <RealizedTab />}
             {activeTab === 'meta_despesa' && <ExpenseBudgetTab />}
             {activeTab === 'historico' && <HistoryTab />}
+            {activeTab === 'sync' && <SyncTab />}
         </div>
       </main>
     </div>

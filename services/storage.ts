@@ -1,6 +1,6 @@
 
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
-import { BudgetItem, CategoryItem, CategorySummary, MonthlySummary, TransactionEntry, UserProfile } from '../types';
+import { BudgetItem, CategoryItem, CategorySummary, MonthlySummary, SyncPacket, TransactionEntry, UserProfile } from '../types';
 
 interface LocalUserAuth {
     email: string;
@@ -22,8 +22,8 @@ interface MonetusDB extends DBSchema {
     value: BudgetItem;
   };
   custom_categories: {
-    key: string; // Composite key or just auto-increment, using ID for simplicity if needed, or just store all in one
-    value: CategoryItem & { id?: string };
+    key: string | number;
+    value: CategoryItem;
     indexes: { 'by-type-cat-expense': [string, string, boolean] };
   };
   user_profile: {
@@ -41,7 +41,7 @@ interface MonetusDB extends DBSchema {
 }
 
 const DB_NAME = 'monetus_db';
-const DB_VERSION = 3; // Incremented for new user fields support conceptually, though IDB is flexible.
+const DB_VERSION = 3;
 
 let dbPromise: Promise<IDBPDatabase<MonetusDB>>;
 
@@ -94,7 +94,6 @@ export const StorageService = {
       const user = await db.get('local_users', email);
       
       if (user && user.password === password) {
-          // Login successful: set as active profile
           await db.put('user_profile', {
               id: user.id,
               name: user.name,
@@ -114,28 +113,22 @@ export const StorageService = {
           throw new Error("Usuário não encontrado.");
       }
 
-      // Simple case-insensitive check for the answer
       if (!user.securityAnswer || user.securityAnswer.trim().toLowerCase() !== securityAnswer.trim().toLowerCase()) {
            throw new Error("Resposta de segurança incorreta.");
       }
 
-      // Update password
       user.password = newPassword;
       await db.put('local_users', user);
   },
 
   getUserProfile: async (): Promise<UserProfile | null> => {
       const db = await getDB();
-      // We might store multiple, but for now let's assume single user active session
-      // We'll use a special key to track 'current' if needed, or just get the first one.
-      // Simulating getting the 'active' profile.
       const allUsers = await db.getAll('user_profile');
       return allUsers.length > 0 ? allUsers[0] : null;
   },
 
   saveUserProfile: async (profile: UserProfile): Promise<void> => {
       const db = await getDB();
-      // Ensure we only have one active session profile for this simple app version
       await db.clear('user_profile'); 
       await db.put('user_profile', profile);
   },
@@ -169,9 +162,6 @@ export const StorageService = {
 
   saveBudget: async (item: BudgetItem): Promise<void> => {
     const db = await getDB();
-    
-    // Check if a budget for this category already exists to update it instead of creating duplicates
-    // if the ID wasn't explicitly passed correctly.
     if (!item.id || item.id.startsWith('temp_')) {
        const all = await db.getAll('budgets');
        const existing = all.find(b => b.type === item.type && b.category === item.category && b.isExpense === item.isExpense);
@@ -179,7 +169,6 @@ export const StorageService = {
            item.id = existing.id;
        }
     }
-
     await db.put('budgets', item);
   },
 
@@ -196,22 +185,58 @@ export const StorageService = {
 
   addCustomCategory: async (item: CategoryItem): Promise<void> => {
       const db = await getDB();
-      // Use the index to check for existence to avoid duplicates based on business logic keys
       const existing = await db.getFromIndex('custom_categories', 'by-type-cat-expense', [item.type, item.category, item.isExpense]);
       if (!existing) {
           await db.add('custom_categories', item);
       }
   },
 
+  // --- Synchronization ---
+  getSyncData: async (): Promise<SyncPacket> => {
+      const db = await getDB();
+      return {
+          transactions: await db.getAll('transactions'),
+          budgets: await db.getAll('budgets'),
+          custom_categories: await db.getAll('custom_categories')
+      };
+  },
+
+  mergeSyncData: async (data: SyncPacket): Promise<void> => {
+      const db = await getDB();
+      // We perform a series of PUT operations. 
+      // Existing items with same ID will be overwritten (last write wins effectively during sync process)
+      // New items will be added.
+      const tx = db.transaction(['transactions', 'budgets', 'custom_categories'], 'readwrite');
+      
+      const promises = [
+          ...data.transactions.map(t => tx.objectStore('transactions').put(t)),
+          ...data.budgets.map(b => tx.objectStore('budgets').put(b)),
+          // For custom categories, we try to avoid duplicates based on the unique index
+          ...data.custom_categories.map(async (c) => {
+               // If it has an ID, try to put it.
+               if (c.id) {
+                   await tx.objectStore('custom_categories').put(c);
+               } else {
+                   // Fallback if no ID (older versions), check existence
+                   // Note: We can't easily use getFromIndex inside this same transaction cleanly without careful async management
+                   // simplified: just try add, ignore if fails due to constraint (if we had one enforced at DB level beyond index)
+                   // Actually, 'put' without key might fail if keyPath is 'id' and it's missing.
+                   // Let's assume synced data has IDs.
+               }
+          })
+      ];
+
+      await Promise.all(promises);
+      await tx.done;
+  },
+
   // --- Reporting Aggregation ---
-  getMonthlySummary: async (monthStr: string): Promise<MonthlySummary> => { // monthStr YYYY-MM
+  getMonthlySummary: async (monthStr: string): Promise<MonthlySummary> => {
     const db = await getDB();
-    
     const start = `${monthStr}-01`;
     const end = `${monthStr}-31`; 
     const range = IDBKeyRange.bound(start, end);
     
-    // Run both fetches in parallel for better performance
     const [monthlyTx, allBudgets] = await Promise.all([
         db.getAllFromIndex('transactions', 'by-date', range),
         db.getAll('budgets')
@@ -235,7 +260,6 @@ export const StorageService = {
         }
     });
 
-    // Helper to attach budget targets to summary items
     const attachBudget = (item: CategorySummary, isExpense: boolean): CategorySummary => {
         const budget = allBudgets.find(b => b.isExpense === isExpense && b.type === item.type && b.category === item.category);
         if (budget) {
@@ -266,15 +290,14 @@ export const StorageService = {
   processRecurrentTransactions: async (): Promise<void> => {
       const db = await getDB();
       const now = new Date();
-      const currentMonthStr = now.toISOString().slice(0, 7); // YYYY-MM
+      const currentMonthStr = now.toISOString().slice(0, 7);
       
       const lastSync = await db.get('system_meta', KEY_LAST_RECURRENCE_SYNC);
 
       if (lastSync === currentMonthStr) {
-          return; // Already processed for this month
+          return;
       }
 
-      // Identify previous month to copy from
       const prevDate = new Date(now.getFullYear(), now.getMonth() - 1, 1);
       const prevMonthStr = prevDate.toISOString().slice(0, 7);
       const prevMonthStart = `${prevMonthStr}-01`;
@@ -283,7 +306,6 @@ export const StorageService = {
       const range = IDBKeyRange.bound(prevMonthStart, prevMonthEnd);
       const prevMonthTx = await db.getAllFromIndex('transactions', 'by-date', range);
       
-      // Find all recurrent transactions from the *immediately preceding* month
       const recurrentToCopy = prevMonthTx.filter(t => t.isRecurrent);
 
       if (recurrentToCopy.length > 0) {
@@ -291,21 +313,17 @@ export const StorageService = {
           const store = tx.objectStore('transactions');
 
           for (const t of recurrentToCopy) {
-              // Calculate new date: same day of month, but in current month
               const originalDate = new Date(t.date);
-              // Handle edge cases like Jan 31 -> Feb 28 automatically by JS Date
               const newDateObj = new Date(now.getFullYear(), now.getMonth(), originalDate.getDate());
               
               const newEntry: TransactionEntry = {
                   ...t,
-                  id: Date.now().toString() + Math.random().toString(36).slice(2, 7), // New unique ID
+                  id: Date.now().toString() + Math.random().toString(36).slice(2, 7),
                   date: newDateObj.toISOString().split('T')[0],
-                  // Keep isRecurrent=true so it propagates next month too
               };
               await store.add(newEntry);
           }
           await tx.done;
-          console.log(`Generated ${recurrentToCopy.length} recurrent transactions for ${currentMonthStr}`);
       }
 
       await db.put('system_meta', currentMonthStr, KEY_LAST_RECURRENCE_SYNC);

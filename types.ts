@@ -24,6 +24,7 @@ export interface CategoryItem {
   type: string;
   category: string;
   isExpense: boolean;
+  id?: string | number; // Added optional ID for sync handling
 }
 
 // "Minhas Entradas" - Actual recorded transactions
@@ -62,4 +63,11 @@ export interface MonthlySummary {
   available: number;
   incomeCategories: CategorySummary[];
   expenseCategories: CategorySummary[];
+}
+
+// Synchronization Data Packet
+export interface SyncPacket {
+  transactions: TransactionEntry[];
+  budgets: BudgetItem[];
+  custom_categories: CategoryItem[];
 }
